@@ -1,0 +1,13 @@
+xslib_fname onegroup.xs
+transient_fname bc_disc_capi.kin
+
+nx 10
+dx 5. 5. 5. 5. 5. 5. 5. 5. 5. 5.
+mat_map F1 F2 F2 F2 F2 F2 F2 F2 F2 F2
+refine 7
+boundary_right albedo
+k_tol 1e-10
+phi_tol 1e-9
+max_iter 100000
+pnorder 0
+albedo 1.0

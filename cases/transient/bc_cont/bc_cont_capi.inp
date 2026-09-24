@@ -1,0 +1,13 @@
+xslib_fname onegroup.xs
+transient_fname bc_cont_capi.kin
+
+nx 5
+dx 10. 10. 10. 10. 10.
+mat_map FUEL FUEL FUEL FUEL FUEL
+refine 8
+boundary_right albedo
+k_tol 1e-10
+phi_tol 1e-9
+max_iter 100000
+pnorder 0
+albedo 1.0

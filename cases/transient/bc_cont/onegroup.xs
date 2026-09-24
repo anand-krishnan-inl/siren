@@ -7,10 +7,6 @@ diffusion
 3.333333E+00
 sigma_t
 1.000000E-01
-sigma_f
-4.000000E-03
-sigma_a
-7.000000E-03
 nusf
 1.000000E-02
 chi

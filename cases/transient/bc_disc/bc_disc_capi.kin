@@ -1,0 +1,11 @@
+nd 1
+beta 0.0075
+lambda 0.08
+
+ng 1
+vel 1e6
+
+deltat 1e-4
+tend 2.0
+reference 'bc-disc-capi'
+tedit 5 0.0 0.5 1.0 1.5 2.0

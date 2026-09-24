@@ -291,7 +291,7 @@ contains
       if (dnd%reference == 'mms') then
         xt = transient_mms_sigma_a(0.5_rk * dx(1), time) &
           + xslib%mat(mthis)%scatter(g,g,1)
-      elseif (dnd%reference == 'bc-cont') then
+      elseif (dnd%reference == 'bc-cont' .or. dnd%reference == 'bc-cont-capi') then
         xt = transient_boundary_control_continuous_sigma_t(xslib, 0.5_rk * dx(1), time)
       else
         xt = xslib%mat(mthis)%sigma_t(g)
@@ -337,7 +337,7 @@ contains
           xt = transient_mms_sigma_a(xleft + 0.5_rk * dx(i), time) &
             + xslib%mat(mthis)%scatter(g,g,1)
           xleft = xleft + dx(i)
-        elseif (dnd%reference == 'bc-cont') then
+        elseif (dnd%reference == 'bc-cont' .or. dnd%reference == 'bc-cont-capi') then
           xt = transient_boundary_control_continuous_sigma_t(xslib, &
             xleft + 0.5_rk * dx(i), time)
           xleft = xleft + dx(i)
@@ -362,7 +362,7 @@ contains
       if (dnd%reference == 'mms') then
         xt = transient_mms_sigma_a(sum(dx(1:nx-1)) + 0.5_rk*dx(nx), time) &
           + xslib%mat(mthis)%scatter(g,g,1)
-      elseif (dnd%reference == 'bc-cont') then
+      elseif (dnd%reference == 'bc-cont' .or. dnd%reference == 'bc-cont-capi') then
         xt = transient_boundary_control_continuous_sigma_t(xslib, &
           sum(dx(1:nx-1)) + 0.5_rk*dx(nx), time)
       else
@@ -680,12 +680,12 @@ contains
           xs%mat(1)%sigma_t(1) = 0.99_rk * xs%mat(1)%sigma_t(1)
           first = .false.
         endif
-      case ('bc-disc')
+      case ('bc-disc', 'bc-disc-capi')
         if (first) then
           xs%mat(1)%sigma_t(1) = 0.99_rk * xs%mat(1)%sigma_t(1)
           first = .false.
         endif
-      case ('bc-cont')
+      case ('bc-cont', 'bc-cont-capi')
         ! do nothing here
         ! this is handeled in transient_build_diagonal
       case ('mms')
@@ -719,6 +719,9 @@ contains
         transient_update_albedo = &
           transient_albedo_pid(time, albedo_coeff, pow_rhs)
       case ('albedo-pid-capi')
+        transient_update_albedo = &
+          transient_albedo_capi(time, albedo_coeff, pow_lhs, pow_rhs)
+      case ('bc-disc-capi', 'bc-cont-capi')
         transient_update_albedo = &
           transient_albedo_capi(time, albedo_coeff, pow_lhs, pow_rhs)
       case default
