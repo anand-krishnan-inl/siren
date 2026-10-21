@@ -801,15 +801,21 @@ contains
 
     logical, save :: first = .true.
     real(rk), save :: xs0
+    real(rk), save :: thold = huge(1.0_rk)
     real(rk), parameter :: alpha = 2e-8_rk
+    character(len=64) :: buf
+    integer :: stat
 
     if (first) then
       xs0 = xslib%mat(1)%sigma_t(1)
+      ! optional ramp-and-hold: freeze the perturbation at t = SIREN_BC_CONT_THOLD [s]
+      call get_environment_variable('SIREN_BC_CONT_THOLD', buf, status=stat)
+      if (stat == 0) read(buf, *) thold
       first = .false.
     endif
 
     transient_boundary_control_continuous_sigma_t = &
-      xs0 - alpha * (50._rk - x)**2 * t**2
+      xs0 - alpha * (50._rk - x)**2 * min(t, thold)**2
   endfunction transient_boundary_control_continuous_sigma_t
 
 endmodule transient
