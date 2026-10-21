@@ -3,7 +3,10 @@
 One process, one SIREN run. Speaks the newline-delimited protocol of
 `siren/src/transient_albedo.c` over a Unix-domain socket:
 
-    recv "<time> <albedo_coeff> <pboundary>\n"   ->   send "<albedo>\n"
+    recv "<time> <albedo_coeff> <pow_lhs> <pow_rhs>\n"   ->   send "<albedo>\n"
+
+(a three-field line from a pre-two-sided binary is still accepted, with
+pow_rhs as its last field.)
 
 All controller modes run through this *same* bridge, first-step handling, log
 schema and saturation accounting, so a difference between two modes is
@@ -17,6 +20,18 @@ attributable to the control law and not to the harness:
                 observer and identifier, with the field feedback held at its
                 design anchor -- the decisive ablation
     full        the method: PI trim + adaptive backstepping field feedback
+
+Two-sided modes (need the 4-field bridge; refuse a 3-field binary):
+
+    observe-2s  pid-tuned drives the plant; the two-output observer and
+                swapping identifier run passively on (pow_lhs, pow_rhs), so
+                identification is scored independently of any new control law
+    pid-mean    pid-tuned's structure on 0.5*(pow_lhs/pl0 + pow_rhs/p0)*p0 --
+                a two-sensor total-power proxy with NO observer: the arm a
+                total-power win has to beat to be credited to the observer
+    pi-total    two-output observer; PI trim on its total-power estimate,
+                field feedback held at the design anchor
+    full-total  the same plus adaptive backstepping field feedback
 
 Why the ablation matters: `documents/phase5_findings.md` records that on the
 spatially-flat case the regulation metrics were insensitive to the backstepping
@@ -35,7 +50,10 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "..", "..", "..", "src"))
 
-MODES = ("echo", "pid-legacy", "pid-tuned", "pi-only", "full")
+MODES = ("echo", "pid-legacy", "pid-tuned", "pi-only", "full",
+         "observe-2s", "pid-mean", "pi-total", "full-total")
+TWO_SIDED = ("observe-2s", "pid-mean", "pi-total", "full-total")
+OUTPUTS_2S = ("lhs", "rhs")
 
 
 def _envf(name, default):
@@ -96,7 +114,7 @@ class VelocityPID:
         return alb
 
 
-def build_adaptive(args, backstepping):
+def build_adaptive(args, backstepping, outputs=("rhs",)):
     from backstep1d.controllers.adaptive import AdaptiveBoundaryController
     from backstep1d.plants.siren_onegroup import (
         SirenOneGroupPlant, SirenOneGroupDesignModel)
@@ -122,6 +140,7 @@ def build_adaptive(args, backstepping):
         gamma=_envf("BS_GAMMA", 200.0),
         resolve_every=int(_envf("BS_RESOLVE_EVERY", 100)),
         dtheta_tol=_envf("BS_DTHETA_TOL", 1.0),
+        gain_ramp=int(_envf("BS_GAIN_RAMP", 0)),
         lam_bounds=(_envf("BS_LAM_LO", -150.0), _envf("BS_LAM_HI", 20.0)),
         robin_alpha=0.0, theta0=theta0,
         ki=_envf("BS_KI", 5.0), kp=_envf("BS_KP", 0.02),
@@ -275,8 +294,9 @@ def main(argv=None):
             ident = ctrl.identifier
             theta_trace.append([time_s] + list(ident.theta))
             if ident.swapping:
-                regressor = ident.xi
-                xi_trace.append([time_s] + list(ident.xi))
+                # two outputs: the 2 x M regressor, flattened row-major
+                regressor = np.ravel(ident.xi)
+                xi_trace.append([time_s] + list(regressor))
             else:
                 overlap = ident.Psi[:, :ident.grid.N] @ (
                     ident.phihat * ident.grid.wq[:ident.grid.N])
@@ -309,6 +329,11 @@ def main(argv=None):
                      "n_bs_clipped": int(ctrl.n_bs_clipped),
                      "bs_clip_frac": float(ctrl.n_bs_clipped
                                            / max(1, counters["steps"])),
+                     "bs_clip_mode": ctrl.bs_clip,
+                     # bs_clip="sum": how often the term asked for less
+                     # leakage than the anchor (and was KEPT, not clipped)
+                     "bs_over_anchor_frac": float(ctrl.n_bs_over_anchor
+                                                  / max(1, counters["steps"])),
                      "z_rms": float(np.sqrt(np.mean(zf ** 2))) if zf.size else None,
                      "z_rms_tail": float(np.sqrt(np.mean(zf[-ntail:] ** 2)))
                                    if zf.size else None,
@@ -321,6 +346,8 @@ def main(argv=None):
                      "albedo_final": float(ctrl.albedo_cmd)})
     with open(os.path.join(out, "diag.json"), "w") as f:
         json.dump(diag, f, indent=2)
+    np.save(os.path.join(out, "recv_trace.npy"),
+            np.asarray(recv_trace, dtype=float).reshape(-1, 4))
     if snaps:
         np.savez(os.path.join(out, "snapshots.npz"),
                  t=np.array([s["t"] for s in snaps]),

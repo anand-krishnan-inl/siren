@@ -2,7 +2,7 @@
  * external controller process over a Unix-domain socket.
  *
  * Protocol (newline-delimited text, one exchange per timestep):
- *   send    "<time> <albedo_coeff> <pboundary>\n"   with %.17g fields
+ *   send    "<time> <albedo_coeff> <pow_lhs> <pow_rhs>\n"   with %.17g fields
  *   receive "<albedo>\n"
  *
  * %.17g round-trips an IEEE double exactly; anything coarser makes last-bit
@@ -13,7 +13,10 @@
  *   SIREN_CTRL_SOCK  socket to connect to    (default "controller.sock")
  *   SIREN_CTRL_LOG   per-step CSV trace      (default "controller_log.csv")
  *
- * pboundary above is pow_rhs, the power at the actuated face x=L.
+ * pow_lhs is the power at the mirror face x=0, pow_rhs (= pboundary in the
+ * log) the power at the actuated face x=L. Both are sent: the two-sided
+ * observer needs the x=0 face, and a three-field reader can still recover the
+ * old protocol by taking the last field as pboundary.
  */
 
 /* snprintf and the POSIX socket declarations are not visible under -ansi
@@ -47,8 +50,7 @@ double transient_albedo(const double time, const double albedo_coeff,
   int len;
   double alb;
   double error;
-  /* the controlled output is the actuated face, x=L; pow_lhs is logged for
-   * the left-hand-side observer but not sent to the controller */
+  /* pboundary is the actuated face, x=L; it keeps the log's column name */
   const double pboundary = pow_rhs;
 
   if (first)
@@ -101,8 +103,8 @@ double transient_albedo(const double time, const double albedo_coeff,
     error = log_p0 - pboundary;
   }
 
-  len = snprintf(sbuf, sizeof(sbuf), "%.17g %.17g %.17g\n",
-                 time, albedo_coeff, pboundary);
+  len = snprintf(sbuf, sizeof(sbuf), "%.17g %.17g %.17g %.17g\n",
+                 time, albedo_coeff, pow_lhs, pow_rhs);
   if (write(sock_fd, sbuf, (size_t)len) != (ssize_t)len)
   {
     perror("transient_albedo: write");
