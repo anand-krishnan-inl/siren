@@ -151,12 +151,29 @@ def build_adaptive(args, backstepping, outputs=("rhs",)):
         # `observers/passive.py`). Selected by environment rather than by
         # `--mode` so that every existing mode string, and therefore every
         # cached run directory, keeps its meaning.
-        regressor=os.environ.get("BS_REGRESSOR", "direct"),
+        # Two outputs are only offered with the swapping law (see
+        # `observers/passive.py`), so the two-sided modes force it.
+        regressor=("swapping" if len(outputs) > 1
+                   else os.environ.get("BS_REGRESSOR", "direct")),
+        outputs=outputs,
         # "hat" (default) is the as-shipped n_basis-dimensional partition of
         # unity; "physics" is the single matched-shape diagnostic basis (see
         # `observers/passive.py`, `scripts/bc8_physics_basis.py`).
-        basis=basis_env)
+        basis=basis_env,
+        # "term" (default) is the as-shipped per-term clamp; "sum" clamps only
+        # the summed albedo command (see `controllers/adaptive.py`). Selected
+        # by environment for the same cache-meaning reason as BS_REGRESSOR.
+        bs_clip=os.environ.get("BS_CLIP", "term"),
+        **drum_kw(args))
     return ctrl
+
+
+def drum_kw(args):
+    """DRUM_TAU [s] lag and DRUM_T180 [s] for a full 180-deg sweep (A from 1
+    to -1, so |dA/dt| <= 2/T180). Unset = ideal actuator."""
+    t180 = _envf("DRUM_T180", 0.0)
+    return {"drum_tau": _envf("DRUM_TAU", 0.0),
+            "drum_rate": 2.0 / t180 if t180 > 0 else float("inf")}
 
 
 def guard(obj, name, counters, key):
@@ -197,9 +214,12 @@ def main(argv=None):
     counters = {"steps": 0, "nonfinite_meas": 0, "nonfinite_cmd": 0,
                 "gain_fail": 0, "kernel_fail": 0, "sat_hi": 0, "sat_lo": 0}
     pid = None
+    pid_cmd = None
+    pid_drum = None
     ctrl = None
     phi_scale = None
     p0 = None
+    pl0 = None
     alb_prev = None
     snaps = []
     next_snap = 0
@@ -216,19 +236,36 @@ def main(argv=None):
     # estimate driving the backstepping term is any good, so it is traced
     # rather than only summarized -- bc3/bc5 gate on it.
     z_trace = []
+    # What the bridge actually delivered, every step and in every mode: bc9
+    # checks it bit-for-bit against SIREN's own controller_log.csv.
+    recv_trace = []
+    # Two-sided modes: the observer's total-power estimate, every step.
+    phat_trace = []
+    split_trace = []
 
     for line in stream:
         parts = line.split()
-        if len(parts) != 3:
+        # 4 fields since the two-sided bridge (time, A, pow_lhs, pow_rhs); 3
+        # from a pre-lhs_observer binary. pboundary is always the last field,
+        # so every existing mode sees exactly the value it saw before.
+        if len(parts) == 4:
+            time_s, albedo_in, pow_lhs, pboundary = (float(x) for x in parts)
+        elif len(parts) == 3:
+            time_s, albedo_in, pboundary = (float(x) for x in parts)
+            pow_lhs = None
+        else:
             continue
-        time_s, albedo_in, pboundary = (float(x) for x in parts)
+        recv_trace.append((time_s, albedo_in,
+                           np.nan if pow_lhs is None else pow_lhs, pboundary))
 
         # ---- first sample: latch the operating point, build the controller
         if counters["steps"] == 0:
             p0 = pboundary
+            pl0 = pow_lhs
             phi_scale = p0
             with open(os.path.join(out, "handshake.json"), "w") as f:
-                json.dump({"mode": args.mode, "p0": p0, "phi_scale": phi_scale,
+                json.dump({"mode": args.mode, "p0": p0, "pl0": pl0,
+                           "phi_scale": phi_scale,
                            "A0": albedo_in, "t0": time_s, "dt": args.dt,
                            "actuator_dx": args.actuator_dx,
                            "n_design": args.n_design,
@@ -240,8 +277,25 @@ def main(argv=None):
                 pid = VelocityPID(kp=_envf("PID_KP", 0.004),
                                   ki=_envf("PID_KI", 0.0),
                                   kd=_envf("PID_KD", 0.001))
-            elif args.mode in ("pi-only", "full"):
+            elif args.mode in ("pid-mean", "observe-2s"):
+                pid = VelocityPID(kp=_envf("PID_KP", 0.004),
+                                  ki=_envf("PID_KI", 0.0),
+                                  kd=_envf("PID_KD", 0.001))
+            if pid is not None:
+                from backstep1d.actuator import DrumActuator
+                pid_drum = DrumActuator(args.dt, A0=albedo_in, **{
+                    {"drum_tau": "tau", "drum_rate": "rate"}[k]: v
+                    for k, v in drum_kw(args).items()})
+            if args.mode in TWO_SIDED and pl0 is None:
+                raise SystemExit("controller_server: mode %s needs pow_lhs; "
+                                 "SIREN sent the 3-field protocol" % args.mode)
+            if args.mode in ("pi-only", "full"):
                 ctrl = build_adaptive(args, backstepping=(args.mode == "full"))
+            elif args.mode in ("observe-2s", "pi-total", "full-total"):
+                ctrl = build_adaptive(args,
+                                      backstepping=(args.mode == "full-total"),
+                                      outputs=OUTPUTS_2S)
+            if ctrl is not None:
                 guard(ctrl.identifier, "_resolve_gain", counters, "gain_fail")
                 guard(ctrl, "_resolve", counters, "kernel_fail")
 
@@ -256,16 +310,36 @@ def main(argv=None):
             continue
 
         # ---- controller
+        # Velocity-form PID accumulates on its own previous COMMAND; with an
+        # ideal drum that is exactly the albedo SIREN echoes back.
+        pid_prev = albedo_in if pid_cmd is None else pid_cmd
         if args.mode == "echo":
             alb = albedo_in
+        elif args.mode == "pid-mean":
+            alb = pid_cmd = pid.step(time_s, pid_prev,
+                                     0.5 * (pow_lhs / pl0 + pboundary / p0) * p0)
+            alb = pid_drum.step(alb)
         elif pid is not None:
-            alb = pid.step(time_s, albedo_in, pboundary)
+            alb = pid_cmd = pid.step(time_s, pid_prev, pboundary)
+            alb = pid_drum.step(alb)
+            if ctrl is not None and counters["steps"] > 0:
+                # observe-2s: the identifier sees the albedo actually applied
+                # (post-clamp), exactly as SIREN will apply it.
+                ctrl.observe_two_sided(pow_lhs / phi_scale,
+                                       pboundary / phi_scale,
+                                       min(max(alb, -1.0), 1.0))
         else:
             if counters["steps"] == 0:
                 alb = albedo_in              # same uncontrolled first step as PID
+            elif args.mode in TWO_SIDED:
+                ctrl.step_two_sided(pow_lhs / phi_scale, pboundary / phi_scale,
+                                    objective="total")
+                alb = ctrl.albedo_applied
             else:
                 ctrl.step_collocated(pboundary / phi_scale)
-                alb = ctrl.albedo_cmd
+                alb = ctrl.albedo_applied
+        if ctrl is not None and ctrl.identifier.n_out > 1:
+            phat_trace.append(ctrl.total_power_estimate())
 
         if not np.isfinite(alb):
             counters["nonfinite_cmd"] += 1
@@ -304,6 +378,8 @@ def main(argv=None):
             regressor_trace.append([time_s] + list(regressor))
         if ctrl is not None:
             z_trace.append(ctrl.identifier.z_last)
+            split_trace.append((getattr(ctrl, "A_bs_last", np.nan),
+                                getattr(ctrl, "A_trim_last", np.nan)))
 
         counters["steps"] += 1
         alb_prev = alb
@@ -358,7 +434,9 @@ def main(argv=None):
                  regressor_trace=(np.array(regressor_trace)
                                   if regressor_trace else np.zeros((0, 0))),
                  xi_trace=np.array(xi_trace) if xi_trace else np.zeros((0, 0)),
-                 z_trace=np.asarray(z_trace, dtype=float))
+                 z_trace=np.asarray(z_trace, dtype=float),
+                 split_trace=np.asarray(split_trace, dtype=float),
+                 phat_trace=np.asarray(phat_trace, dtype=float))
     print("controller_server: mode=%s steps=%d %s"
           % (args.mode, counters["steps"],
              {k: v for k, v in counters.items() if k != "steps" and v}),
