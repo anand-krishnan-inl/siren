@@ -649,6 +649,9 @@ contains
 
     logical, save :: first = .true.
     real(rk), save :: sigma0
+    real(rk) :: fac
+    character(len=64) :: buf
+    integer :: stat
 
     select case (name)
       case ('anl-slab-6-a1')
@@ -682,7 +685,15 @@ contains
         endif
       case ('bc-disc', 'bc-disc-capi')
         if (first) then
-          xs%mat(1)%sigma_t(1) = 0.99_rk * xs%mat(1)%sigma_t(1)
+          ! SIREN_BC_DISC_FRAC sizes the step (fractional sigma_t drop in F1);
+          ! unset keeps the original 1% step exactly
+          fac = 0.99_rk
+          call get_environment_variable('SIREN_BC_DISC_FRAC', buf, status=stat)
+          if (stat == 0) then
+            read(buf, *) fac
+            fac = 1.0_rk - fac
+          endif
+          xs%mat(1)%sigma_t(1) = fac * xs%mat(1)%sigma_t(1)
           first = .false.
         endif
       case ('bc-cont', 'bc-cont-capi')

@@ -93,6 +93,7 @@ class VelocityPID:
         self.prev_error = 0.0
         self.prev_time = 0.0
         self.interror = 0.0
+        self.last_dint = 0.0  # this step's integral increment, for anti-windup
 
     def step(self, time_s, albedo_in, pboundary):
         alb = albedo_in
@@ -104,7 +105,8 @@ class VelocityPID:
             error = self.p0 - pboundary
             dt = time_s - self.prev_time
             derror_dt = (error - self.prev_error) / dt if dt != 0.0 else 0.0
-            self.interror += error * dt
+            self.last_dint = error * dt
+            self.interror += self.last_dint
             alb += (self.kp * error + self.kd * derror_dt
                     + self.ki * self.interror)
             self.raw = alb
@@ -216,6 +218,11 @@ def main(argv=None):
     pid = None
     pid_cmd = None
     pid_drum = None
+    # PID_AW=1, anti-windup against the drum: on a step where the command was
+    # not delivered (rate-limited or clamped), undo the integral increment and
+    # restart the velocity-form accumulation from the delivered albedo. The
+    # servo lag alone does not trigger it.
+    pid_aw = os.environ.get("PID_AW", "") not in ("", "0")
     ctrl = None
     phi_scale = None
     p0 = None
@@ -318,10 +325,20 @@ def main(argv=None):
         elif args.mode == "pid-mean":
             alb = pid_cmd = pid.step(time_s, pid_prev,
                                      0.5 * (pow_lhs / pl0 + pboundary / p0) * p0)
+            nlim = pid_drum.n_rate_limited
             alb = pid_drum.step(alb)
+            if pid_aw and (pid_drum.n_rate_limited > nlim
+                           or not -1.0 <= pid.raw <= 1.0):
+                pid.interror -= pid.last_dint
+                pid_cmd = alb
         elif pid is not None:
             alb = pid_cmd = pid.step(time_s, pid_prev, pboundary)
+            nlim = pid_drum.n_rate_limited
             alb = pid_drum.step(alb)
+            if pid_aw and (pid_drum.n_rate_limited > nlim
+                           or not -1.0 <= pid.raw <= 1.0):
+                pid.interror -= pid.last_dint
+                pid_cmd = alb
             if ctrl is not None and counters["steps"] > 0:
                 # observe-2s: the identifier sees the albedo actually applied
                 # (post-clamp), exactly as SIREN will apply it.
